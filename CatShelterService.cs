@@ -4,64 +4,20 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microservices.Common.Exceptions;
 using Microservices.ExternalServices.Authorization;
+using Microservices.ExternalServices.Authorization.Types;
 using Microservices.ExternalServices.Billing;
 using Microservices.ExternalServices.Billing.Types;
 using Microservices.ExternalServices.CatDb;
+using Microservices.ExternalServices.CatDb.Types;
 using Microservices.ExternalServices.CatExchange;
+using Microservices.ExternalServices.CatExchange.Types;
 using Microservices.ExternalServices.Database;
 using Microservices.Types;
 
 namespace Microservices
 {
-    public class CatEntity : Cat, IEntityWithId<Guid>
-    {
-        public Guid Id { get; set; }
-        public Guid BreedId { get; set; }
-        public Guid AddedBy { get; set; }
-        public string Breed { get; set; }
-        public string Name { get; set; }
-        public byte[] CatPhoto { get; set; }
-        public byte[] BreedPhoto { get; set; }
-        public decimal Price { get; set; }
-        public List<(DateTime Date, decimal Price)> Prices { get; set; }
-
-        public CatEntity(Cat cat)
-        {
-            Id = cat.Id;
-            BreedId = cat.BreedId;
-            AddedBy = cat.AddedBy;
-            Breed = cat.Breed;
-            Name = cat.Name;
-            CatPhoto = cat.CatPhoto;
-            BreedPhoto = cat.BreedPhoto;
-            Price = cat.Price;
-            Prices = cat.Prices;
-        }
-
-        public Cat MakeCat()
-        {
-            return new Cat
-            {
-                Id = this.Id,
-                BreedId = this.BreedId,
-                AddedBy = this.AddedBy,
-                Breed = this.Breed,
-                Name = this.Name,
-                CatPhoto = this.CatPhoto,
-                BreedPhoto = this.BreedPhoto,
-                Price = this.Price,
-                Prices = this.Prices,
-            };
-        }
-    }
-
-    public class UserFavorites : IEntityWithId<Guid>
-    {
-        public Guid Id { get; set; }
-        public HashSet<Guid> Favorites { get; set; }
-    }
-
     public class CatShelterService : ICatShelterService
     {
         private readonly IDatabase _db;
@@ -86,15 +42,18 @@ namespace Microservices
 
         public async Task<List<Cat>> GetCatsAsync(string sessionId, int skip, int limit, CancellationToken cancellationToken)
         {
-            
-            var collection = _db.GetCollection<CatEntity, Guid>("Cats");
+            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
+            if (!user.IsSuccess)
+                throw new AuthorizationException();
 
-            var billing = await _billingService.GetProductsAsync(skip, limit, cancellationToken);
+            var catsInShelter = _db.GetCollection<CatEntity, Guid>("Cats");
+
+            var billing = await TryTwice<List<Product>>(() => _billingService.GetProductsAsync(skip, limit, cancellationToken));
 
             var cats = new List<Cat>();
-            foreach(var product in billing)
+            foreach (var product in billing)
             {
-                var f = await collection.FindAsync(product.Id, cancellationToken);
+                var f = await TryTwice<CatEntity>(() => catsInShelter.FindAsync(product.Id, cancellationToken));
                 cats.Add(f.MakeCat());
             }
 
@@ -103,18 +62,18 @@ namespace Microservices
 
         public async Task AddCatToFavouritesAsync(string sessionId, Guid catId, CancellationToken cancellationToken)
         {
-            var user = await _authorizationService.AuthorizeAsync(sessionId, cancellationToken);
+            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
+            if (!user.IsSuccess)
+                throw new AuthorizationException();
 
             var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
 
-            var userFavorites = await favorites.FindAsync(user.UserId, cancellationToken);
-
-            
+            var userFavorites = await TryTwice<UserFavorites>(() => favorites.FindAsync(user.UserId, cancellationToken));
 
             if (userFavorites == null)
             {
                 userFavorites = new UserFavorites { Id = user.UserId, Favorites = new HashSet<Guid>() };
-                await favorites.WriteAsync(userFavorites, cancellationToken);
+                await TryTwice(() => favorites.WriteAsync(userFavorites, cancellationToken));
             }
 
             userFavorites.Favorites.Add(catId);
@@ -122,12 +81,15 @@ namespace Microservices
 
         public async Task<List<Cat>> GetFavouriteCatsAsync(string sessionId, CancellationToken cancellationToken)
         {
-            var user = await _authorizationService.AuthorizeAsync(sessionId, cancellationToken);
+            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
+            if (!user.IsSuccess)
+                throw new AuthorizationException();
+
             var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
 
-            var userFavorites = await favorites.FindAsync(user.UserId, cancellationToken);
+            var userFavorites = await TryTwice<UserFavorites>(() => favorites.FindAsync(user.UserId, cancellationToken));
 
-            var collection = _db.GetCollection<CatEntity, Guid>("Cats");
+            var catsInShelter = _db.GetCollection<CatEntity, Guid>("Cats");
 
             var cats = new List<Cat>();
 
@@ -135,31 +97,67 @@ namespace Microservices
             {
                 foreach (var id in userFavorites.Favorites)
                 {
-                    var f = await collection.FindAsync(id, cancellationToken);
-                    cats.Add(f.MakeCat());
+                    var cat = await TryTwice<Product>(() => _billingService.GetProductAsync(id, cancellationToken));
+                    if (cat != null)
+                    {
+                        var catEntity = await TryTwice<CatEntity>(() => catsInShelter.FindAsync(id, cancellationToken));
+                        cats.Add(catEntity.MakeCat());
+                    }
                 }
             }
 
             return cats;
         }
 
-        public Task DeleteCatFromFavouritesAsync(string sessionId, Guid catId, CancellationToken cancellationToken)
+        public async Task DeleteCatFromFavouritesAsync(string sessionId, Guid catId, CancellationToken cancellationToken)
         {
-            throw new NotImplementedException();
+            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
+            if (!user.IsSuccess)
+                throw new AuthorizationException();
+
+            var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
+
+            var userFavorites = await TryTwice<UserFavorites>(() => favorites.FindAsync(user.UserId, cancellationToken));
+
+            if (userFavorites != null && userFavorites.Favorites != null)
+            {
+                userFavorites.Favorites.Remove(catId);
+            }
         }
 
-        public Task<Bill> BuyCatAsync(string sessionId, Guid catId, CancellationToken cancellationToken)
+        public async Task<Bill> BuyCatAsync(string sessionId, Guid catId, CancellationToken cancellationToken)
         {
-            throw new NotImplementedException();
+            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
+            if (!user.IsSuccess)
+                throw new AuthorizationException();
+
+            var product = await TryTwice<Product>(() => _billingService.GetProductAsync(catId, cancellationToken));
+
+            if (product == null)
+                throw new InvalidRequestException();
+
+            var catsInShelter = _db.GetCollection<CatEntity, Guid>("Cats");
+
+            var cat = await TryTwice<CatEntity>(() => catsInShelter.FindAsync(catId, cancellationToken));
+
+            if (cat == null)
+                return null;
+
+            var bill = await TryTwice<Bill>(() => _billingService.SellProductAsync(catId, cat.Price, cancellationToken));
+
+            return bill;
         }
 
         public async Task<Guid> AddCatAsync(string sessionId, AddCatRequest request, CancellationToken cancellationToken)
         {
-            var user = await _authorizationService.AuthorizeAsync(sessionId, cancellationToken);
+            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
+            
+            if (!user.IsSuccess)
+                throw new AuthorizationException();
 
-            var catInfo = await _catInfoService.FindByBreedNameAsync(request.Breed, cancellationToken);
+            var catInfo = await TryTwice<CatInfo>(() => _catInfoService.FindByBreedNameAsync(request.Breed, cancellationToken));
 
-            var priceInfo = await _catExchangeService.GetPriceInfoAsync(catInfo.BreedId, cancellationToken);
+            var priceInfo = await TryTwice<CatPriceHistory>(() => _catExchangeService.GetPriceInfoAsync(catInfo.BreedId, cancellationToken));
 
             var latestPrice = priceInfo.Prices != null && priceInfo.Prices.Count > 0
                 ? priceInfo.Prices.Last()
@@ -178,12 +176,88 @@ namespace Microservices
                 Prices = priceInfo.Prices.Select(p => (p.Date, p.Price)).ToList()
             };
 
-            var billingTask = _billingService.AddProductAsync(new Product { Id = cat.Id, BreedId = cat.BreedId }, cancellationToken);
+            await TryTwice(() =>_billingService.AddProductAsync(new Product { Id = cat.Id, BreedId = cat.BreedId }, cancellationToken));
 
             var cats = _db.GetCollection<CatEntity, Guid>("Cats");
-            await cats.WriteAsync(new CatEntity(cat), cancellationToken);
+            await TryTwice(() => cats.WriteAsync(new CatEntity(cat), cancellationToken));
 
             return cat.Id;
+        }
+
+        private static async Task<T> TryTwice<T>(Func<Task<T>> func)
+        {
+            try
+            {
+                return await func();
+            }
+            catch (ConnectionException)
+            {
+                try
+                {
+                    return await func();
+                }
+                catch(ConnectionException)
+                {
+                    throw new InternalErrorException();
+                }
+            }
+        }
+
+        private static async Task TryTwice(Func<Task> func)
+        {
+            try
+            {
+                await func();
+            }
+            catch (ConnectionException)
+            {
+                try
+                {
+                    await func();
+                }
+                catch (ConnectionException)
+                {
+                    throw new InternalErrorException();
+                }
+            }
+        }
+
+        private class CatEntity : Cat, IEntityWithId<Guid>
+        {
+            public CatEntity(Cat cat)
+            {
+                Id = cat.Id;
+                BreedId = cat.BreedId;
+                AddedBy = cat.AddedBy;
+                Breed = cat.Breed;
+                Name = cat.Name;
+                CatPhoto = cat.CatPhoto;
+                BreedPhoto = cat.BreedPhoto;
+                Price = cat.Price;
+                Prices = cat.Prices;
+            }
+
+            public Cat MakeCat()
+            {
+                return new Cat
+                {
+                    Id = this.Id,
+                    BreedId = this.BreedId,
+                    AddedBy = this.AddedBy,
+                    Breed = this.Breed,
+                    Name = this.Name,
+                    CatPhoto = this.CatPhoto,
+                    BreedPhoto = this.BreedPhoto,
+                    Price = this.Price,
+                    Prices = this.Prices,
+                };
+            }
+        }
+
+        private class UserFavorites : IEntityWithId<Guid>
+        {
+            public Guid Id { get; set; }
+            public HashSet<Guid> Favorites { get; set; }
         }
     }
 }
