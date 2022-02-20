@@ -53,8 +53,8 @@ namespace Microservices
             var cats = new List<Cat>();
             foreach (var product in billing)
             {
-                var f = await TryTwice<CatEntity>(() => catsInShelter.FindAsync(product.Id, cancellationToken));
-                cats.Add(f.MakeCat());
+                var catEntity = await TryTwice<CatEntity>(() => catsInShelter.FindAsync(product.Id, cancellationToken));
+                cats.Add(catEntity as Cat);
             }
 
             return cats;
@@ -101,7 +101,7 @@ namespace Microservices
                     if (cat != null)
                     {
                         var catEntity = await TryTwice<CatEntity>(() => catsInShelter.FindAsync(id, cancellationToken));
-                        cats.Add(catEntity.MakeCat());
+                        cats.Add(catEntity as Cat);
                     }
                 }
             }
@@ -176,9 +176,10 @@ namespace Microservices
                 Prices = priceInfo.Prices.Select(p => (p.Date, p.Price)).ToList()
             };
 
-            await TryTwice(() =>_billingService.AddProductAsync(new Product { Id = cat.Id, BreedId = cat.BreedId }, cancellationToken));
+            await TryTwice(() => _billingService.AddProductAsync(new Product { Id = cat.Id, BreedId = cat.BreedId }, cancellationToken));
 
             var cats = _db.GetCollection<CatEntity, Guid>("Cats");
+            
             await TryTwice(() => cats.WriteAsync(new CatEntity(cat), cancellationToken));
 
             return cat.Id;
@@ -235,22 +236,6 @@ namespace Microservices
                 BreedPhoto = cat.BreedPhoto;
                 Price = cat.Price;
                 Prices = cat.Prices;
-            }
-
-            public Cat MakeCat()
-            {
-                return new Cat
-                {
-                    Id = this.Id,
-                    BreedId = this.BreedId,
-                    AddedBy = this.AddedBy,
-                    Breed = this.Breed,
-                    Name = this.Name,
-                    CatPhoto = this.CatPhoto,
-                    BreedPhoto = this.BreedPhoto,
-                    Price = this.Price,
-                    Prices = this.Prices,
-                };
             }
         }
 
