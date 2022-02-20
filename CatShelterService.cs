@@ -59,7 +59,7 @@ namespace Microservices
     public class UserFavorites : IEntityWithId<Guid>
     {
         public Guid Id { get; set; }
-        public List<Guid> Favorites { get; set; }
+        public HashSet<Guid> Favorites { get; set; }
     }
 
     public class CatShelterService : ICatShelterService
@@ -87,27 +87,15 @@ namespace Microservices
         public async Task<List<Cat>> GetCatsAsync(string sessionId, int skip, int limit, CancellationToken cancellationToken)
         {
             
-            var collection = _db.GetCollection<IEntityWithId<Guid>, Guid>("Cats");
+            var collection = _db.GetCollection<CatEntity, Guid>("Cats");
 
             var billing = await _billingService.GetProductsAsync(skip, limit, cancellationToken);
 
             var cats = new List<Cat>();
             foreach(var product in billing)
             {
-                var f = await Task<CatEntity>.Run(()=> { return collection.FindAsync(product.Id, cancellationToken); });
-                var t = f.GetType().GetProperties();
-                cats.Add(new Cat
-                {
-                    Id = (Guid)t[0].GetValue(f),
-                    BreedId = (Guid)t[1].GetValue(f),
-                    AddedBy = (Guid)t[2].GetValue(f),
-                    Breed = (string)t[3].GetValue(f),
-                    Name = (string)t[4].GetValue(f),
-                    CatPhoto = (byte[])t[5].GetValue(f),
-                    BreedPhoto = (byte[])t[6].GetValue(f),
-                    Price = (decimal)t[7].GetValue(f),
-                    Prices = (List<(DateTime Date, decimal Price)>)t[8].GetValue(f),
-                });
+                var f = await collection.FindAsync(product.Id, cancellationToken);
+                cats.Add(f.MakeCat());
             }
 
             return cats;
@@ -119,17 +107,16 @@ namespace Microservices
 
             var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
 
-            var userFavorites = await Task<UserFavorites>.Run(() => { return favorites.FindAsync(user.UserId, cancellationToken); });
+            var userFavorites = await favorites.FindAsync(user.UserId, cancellationToken);
 
             
 
             if (userFavorites == null)
             {
-                userFavorites = new UserFavorites { Id = user.UserId, Favorites = new List<Guid>() };
-                await Task.Run(() => favorites.WriteAsync(userFavorites, cancellationToken));
+                userFavorites = new UserFavorites { Id = user.UserId, Favorites = new HashSet<Guid>() };
+                await favorites.WriteAsync(userFavorites, cancellationToken);
             }
 
-            //throw new Exception((userFavorites == null).ToString());
             userFavorites.Favorites.Add(catId);
         }
 
@@ -138,35 +125,19 @@ namespace Microservices
             var user = await _authorizationService.AuthorizeAsync(sessionId, cancellationToken);
             var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
 
-            
+            var userFavorites = await favorites.FindAsync(user.UserId, cancellationToken);
 
-            var userFavorites = await Task<UserFavorites>.Run(() => { return favorites.FindAsync(user.UserId, cancellationToken); });
-            var temp = userFavorites.GetType().GetProperties();
-            var uf = (List<Guid>)temp[1].GetValue(userFavorites);
-
-            //throw new Exception(userFavorites.Favorites[0].ToString() + "\n" + userFavorites.Favorites[1].ToString());
-
-            var collection = _db.GetCollection<IEntityWithId<Guid>, Guid>("Cats");
+            var collection = _db.GetCollection<CatEntity, Guid>("Cats");
 
             var cats = new List<Cat>();
 
-            //var uf = new List<Guid>((userFavorites as UserFavorites).Favorites);
-            foreach (var id in uf)
+            if (userFavorites != null && userFavorites.Favorites != null)
             {
-                var f = await Task<CatEntity>.Run(() => { return collection.FindAsync(id, cancellationToken); });
-                var t = f.GetType().GetProperties();
-                cats.Add(new Cat
+                foreach (var id in userFavorites.Favorites)
                 {
-                    Id = (Guid)t[0].GetValue(f),
-                    BreedId = (Guid)t[1].GetValue(f),
-                    AddedBy = (Guid)t[2].GetValue(f),
-                    Breed = (string)t[3].GetValue(f),
-                    Name = (string)t[4].GetValue(f),
-                    CatPhoto = (byte[])t[5].GetValue(f),
-                    BreedPhoto = (byte[])t[6].GetValue(f),
-                    Price = (decimal)t[7].GetValue(f),
-                    Prices = (List<(DateTime Date, decimal Price)>)t[8].GetValue(f),
-                });
+                    var f = await collection.FindAsync(id, cancellationToken);
+                    cats.Add(f.MakeCat());
+                }
             }
 
             return cats;
@@ -209,16 +180,8 @@ namespace Microservices
 
             var billingTask = _billingService.AddProductAsync(new Product { Id = cat.Id, BreedId = cat.BreedId }, cancellationToken);
 
-            var cats = _db.GetCollection<IEntityWithId<Guid>, Guid>("Cats");
-            await Task.Run( () =>  cats.WriteAsync(new CatEntity(cat), cancellationToken));
-
-            //var rats = _db.GetCollection<IEntityWithId<Guid>, Guid>("Cats");
-            //var g = await Task<Cat>.Run(() => { return rats.FindAsync(cat.Id, cancellationToken); });
-
-            //var r = new StringBuilder();
-            //foreach (var prop in g.GetType().GetProperties())
-            //    r.Append(prop.Name + "\t" + prop.GetValue(g).ToString() + "\n");
-            //throw new Exception(r.ToString());
+            var cats = _db.GetCollection<CatEntity, Guid>("Cats");
+            await cats.WriteAsync(new CatEntity(cat), cancellationToken);
 
             return cat.Id;
         }
