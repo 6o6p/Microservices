@@ -40,20 +40,19 @@ namespace Microservices
             _catExchangeService = catExchangeService;
         }
 
-        public async Task<List<Cat>> GetCatsAsync(string sessionId, int skip, int limit, CancellationToken cancellationToken)
+        public async Task<List<Cat>> GetCatsAsync(string sessionId, int skip, int limit, 
+                                                  CancellationToken cancellationToken)
         {
-            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
-            if (!user.IsSuccess)
-                throw new AuthorizationException();
+            var user = await TryAuthorize(sessionId, cancellationToken);
 
             var catsInShelter = _db.GetCollection<CatEntity, Guid>("Cats");
 
-            var billing = await TryTwice<List<Product>>(() => _billingService.GetProductsAsync(skip, limit, cancellationToken));
+            var billing = await TryTwice(() => _billingService.GetProductsAsync(skip, limit, cancellationToken));
 
             var cats = new List<Cat>();
             foreach (var product in billing)
             {
-                var catEntity = await TryTwice<CatEntity>(() => catsInShelter.FindAsync(product.Id, cancellationToken));
+                var catEntity = await TryTwice(() => catsInShelter.FindAsync(product.Id, cancellationToken));
                 cats.Add(catEntity as Cat);
             }
 
@@ -62,32 +61,28 @@ namespace Microservices
 
         public async Task AddCatToFavouritesAsync(string sessionId, Guid catId, CancellationToken cancellationToken)
         {
-            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
-            if (!user.IsSuccess)
-                throw new AuthorizationException();
+            var user = await TryAuthorize(sessionId, cancellationToken);
 
             var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
 
-            var userFavorites = await TryTwice<UserFavorites>(() => favorites.FindAsync(user.UserId, cancellationToken));
+            var userFavorites = await TryTwice(() => favorites.FindAsync(user.UserId, cancellationToken));
 
             if (userFavorites == null)
             {
                 userFavorites = new UserFavorites { Id = user.UserId, Favorites = new HashSet<Guid>() };
-                await TryTwice(() => favorites.WriteAsync(userFavorites, cancellationToken));
             }
 
             userFavorites.Favorites.Add(catId);
+            await TryTwice(() => favorites.WriteAsync(userFavorites, cancellationToken));
         }
 
         public async Task<List<Cat>> GetFavouriteCatsAsync(string sessionId, CancellationToken cancellationToken)
         {
-            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
-            if (!user.IsSuccess)
-                throw new AuthorizationException();
+            var user = await TryAuthorize(sessionId, cancellationToken);
 
             var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
 
-            var userFavorites = await TryTwice<UserFavorites>(() => favorites.FindAsync(user.UserId, cancellationToken));
+            var userFavorites = await TryTwice(() => favorites.FindAsync(user.UserId, cancellationToken));
 
             var catsInShelter = _db.GetCollection<CatEntity, Guid>("Cats");
 
@@ -97,10 +92,10 @@ namespace Microservices
             {
                 foreach (var id in userFavorites.Favorites)
                 {
-                    var cat = await TryTwice<Product>(() => _billingService.GetProductAsync(id, cancellationToken));
+                    var cat = await TryTwice(() => _billingService.GetProductAsync(id, cancellationToken));
                     if (cat != null)
                     {
-                        var catEntity = await TryTwice<CatEntity>(() => catsInShelter.FindAsync(id, cancellationToken));
+                        var catEntity = await TryTwice(() => catsInShelter.FindAsync(id, cancellationToken));
                         cats.Add(catEntity as Cat);
                     }
                 }
@@ -109,59 +104,53 @@ namespace Microservices
             return cats;
         }
 
-        public async Task DeleteCatFromFavouritesAsync(string sessionId, Guid catId, CancellationToken cancellationToken)
+        public async Task DeleteCatFromFavouritesAsync(string sessionId, Guid catId, 
+                                                       CancellationToken cancellationToken)
         {
-            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
-            if (!user.IsSuccess)
-                throw new AuthorizationException();
+            var user = await TryAuthorize(sessionId, cancellationToken);
 
             var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
 
-            var userFavorites = await TryTwice<UserFavorites>(() => favorites.FindAsync(user.UserId, cancellationToken));
+            var userFavorites = await TryTwice(() => favorites.FindAsync(user.UserId, cancellationToken));
 
             if (userFavorites != null && userFavorites.Favorites != null)
             {
                 userFavorites.Favorites.Remove(catId);
+                await TryTwice(() => favorites.WriteAsync(userFavorites, cancellationToken));
             }
         }
 
         public async Task<Bill> BuyCatAsync(string sessionId, Guid catId, CancellationToken cancellationToken)
         {
-            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
-            if (!user.IsSuccess)
-                throw new AuthorizationException();
+            var user = await TryAuthorize(sessionId, cancellationToken);
 
-            var product = await TryTwice<Product>(() => _billingService.GetProductAsync(catId, cancellationToken));
+            var product = await TryTwice(() => _billingService.GetProductAsync(catId, cancellationToken));
 
             if (product == null)
                 throw new InvalidRequestException();
 
             var catsInShelter = _db.GetCollection<CatEntity, Guid>("Cats");
 
-            var cat = await TryTwice<CatEntity>(() => catsInShelter.FindAsync(catId, cancellationToken));
+            var cat = await TryTwice(() => catsInShelter.FindAsync(catId, cancellationToken));
 
             if (cat == null)
                 return null;
 
-            var bill = await TryTwice<Bill>(() => _billingService.SellProductAsync(catId, cat.Price, cancellationToken));
-
-            return bill;
+            return await TryTwice(() => _billingService.SellProductAsync(catId, cat.Price, cancellationToken)); ;
         }
 
-        public async Task<Guid> AddCatAsync(string sessionId, AddCatRequest request, CancellationToken cancellationToken)
+        public async Task<Guid> AddCatAsync(string sessionId, AddCatRequest request, 
+                                            CancellationToken cancellationToken)
         {
-            var user = await TryTwice<AuthorizationResult>(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
-            
-            if (!user.IsSuccess)
-                throw new AuthorizationException();
+            var user = await TryAuthorize(sessionId, cancellationToken);
 
-            var catInfo = await TryTwice<CatInfo>(() => _catInfoService.FindByBreedNameAsync(request.Breed, cancellationToken));
+            var catInfo = await TryTwice(() => _catInfoService.FindByBreedNameAsync(request.Breed, cancellationToken));
 
-            var priceInfo = await TryTwice<CatPriceHistory>(() => _catExchangeService.GetPriceInfoAsync(catInfo.BreedId, cancellationToken));
+            var priceInfo = await TryTwice(() => _catExchangeService.GetPriceInfoAsync(catInfo.BreedId, cancellationToken));
 
             var latestPrice = priceInfo.Prices != null && priceInfo.Prices.Count > 0
                 ? priceInfo.Prices.Last()
-                : new ExternalServices.CatExchange.Types.CatPriceInfo { Date = DateTime.Now, Price = 1000 };
+                : new CatPriceInfo { Date = DateTime.Now, Price = 1000 };
 
             var cat = new Cat()
             {
@@ -176,16 +165,23 @@ namespace Microservices
                 Prices = priceInfo.Prices.Select(p => (p.Date, p.Price)).ToList()
             };
 
-            await TryTwice(() => _billingService.AddProductAsync(new Product { Id = cat.Id, BreedId = cat.BreedId }, cancellationToken));
+            await TryTwice(() => _billingService.AddProductAsync(
+                new Product 
+                { 
+                    Id = cat.Id, 
+                    BreedId = cat.BreedId 
+                }, 
+                cancellationToken
+            ));
 
-            var cats = _db.GetCollection<CatEntity, Guid>("Cats");
-            
-            await TryTwice(() => cats.WriteAsync(new CatEntity(cat), cancellationToken));
+            await TryTwice(() => _db
+                                    .GetCollection<CatEntity, Guid>("Cats")
+                                    .WriteAsync(new CatEntity(cat), cancellationToken));
 
             return cat.Id;
         }
 
-        private static async Task<T> TryTwice<T>(Func<Task<T>> func)
+        private async Task<T> TryTwice<T>(Func<Task<T>> func)
         {
             try
             {
@@ -204,7 +200,7 @@ namespace Microservices
             }
         }
 
-        private static async Task TryTwice(Func<Task> func)
+        private async Task TryTwice(Func<Task> func)
         {
             try
             {
@@ -243,6 +239,15 @@ namespace Microservices
         {
             public Guid Id { get; set; }
             public HashSet<Guid> Favorites { get; set; }
+        }
+
+        private async Task<AuthorizationResult> TryAuthorize(string sessionId, CancellationToken cancellationToken)
+        {
+            var result = await TryTwice(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
+
+            return result.IsSuccess
+                ? result
+                : throw new AuthorizationException();
         }
     }
 }
