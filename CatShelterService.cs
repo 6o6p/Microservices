@@ -47,7 +47,7 @@ namespace Microservices
 
             var catsInShelter = _db.GetCollection<CatEntity, Guid>("Cats");
 
-            var billing = await TryTwice(() => _billingService.GetProductsAsync(skip, limit, cancellationToken));
+            var billing = await TryTwice(() => _billingService.GetProductsAsync(skip, limit, cancellationToken));       
 
             var cats = new List<Cat>();
             foreach (var product in billing)
@@ -63,9 +63,7 @@ namespace Microservices
         {
             var user = await TryAuthorize(sessionId, cancellationToken);
 
-            var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
-
-            var userFavorites = await TryTwice(() => favorites.FindAsync(user.UserId, cancellationToken));
+            var userFavorites = await GetUserFavorites(user.UserId, cancellationToken);
 
             if (userFavorites == null)
             {
@@ -73,16 +71,15 @@ namespace Microservices
             }
 
             userFavorites.Favorites.Add(catId);
-            await TryTwice(() => favorites.WriteAsync(userFavorites, cancellationToken));
+
+            await WriteUserFavorites(userFavorites, cancellationToken);
         }
 
         public async Task<List<Cat>> GetFavouriteCatsAsync(string sessionId, CancellationToken cancellationToken)
         {
             var user = await TryAuthorize(sessionId, cancellationToken);
 
-            var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
-
-            var userFavorites = await TryTwice(() => favorites.FindAsync(user.UserId, cancellationToken));
+            var userFavorites = await GetUserFavorites(user.UserId, cancellationToken);
 
             var catsInShelter = _db.GetCollection<CatEntity, Guid>("Cats");
 
@@ -109,14 +106,12 @@ namespace Microservices
         {
             var user = await TryAuthorize(sessionId, cancellationToken);
 
-            var favorites = _db.GetCollection<UserFavorites, Guid>("Favorites");
-
-            var userFavorites = await TryTwice(() => favorites.FindAsync(user.UserId, cancellationToken));
+            var userFavorites = await GetUserFavorites(user.UserId, cancellationToken);
 
             if (userFavorites != null && userFavorites.Favorites != null)
             {
                 userFavorites.Favorites.Remove(catId);
-                await TryTwice(() => favorites.WriteAsync(userFavorites, cancellationToken));
+                await WriteUserFavorites(userFavorites, cancellationToken);
             }
         }
 
@@ -129,14 +124,13 @@ namespace Microservices
             if (product == null)
                 throw new InvalidRequestException();
 
-            var catsInShelter = _db.GetCollection<CatEntity, Guid>("Cats");
+            var cat = await TryTwice(() => _db
+                                            .GetCollection<CatEntity, Guid>("Cats")
+                                            .FindAsync(catId, cancellationToken));
 
-            var cat = await TryTwice(() => catsInShelter.FindAsync(catId, cancellationToken));
-
-            if (cat == null)
-                return null;
-
-            return await TryTwice(() => _billingService.SellProductAsync(catId, cat.Price, cancellationToken)); ;
+            return cat == null
+                ? null    
+                : await TryTwice(() => _billingService.SellProductAsync(catId, cat.Price, cancellationToken));
         }
 
         public async Task<Guid> AddCatAsync(string sessionId, AddCatRequest request, 
@@ -249,5 +243,17 @@ namespace Microservices
                 ? result
                 : throw new AuthorizationException();
         }
+
+        private async Task<UserFavorites> GetUserFavorites(Guid userId, CancellationToken cancellationToken) =>
+            await TryTwice(() => _db
+                                    .GetCollection<UserFavorites, Guid>("Favorites")
+                                    .FindAsync(userId, cancellationToken)
+            );
+
+        private async Task WriteUserFavorites(UserFavorites userFavorites, CancellationToken cancellationToken) =>
+            await TryTwice(() => _db
+                                    .GetCollection<UserFavorites, Guid>("Favorites")
+                                    .WriteAsync(userFavorites, cancellationToken)
+            );
     }
 }
