@@ -75,20 +75,28 @@ namespace Microservices
 
             var userFavorites = await FindInCollectionAsync<UserFavorites>("Favorites", user.UserId, cancellationToken);
 
-            var cats = new List<Cat>();
+            //var cats = new List<Cat>();
 
-            if (userFavorites != null && userFavorites.Favorites != null)
-            {
-                foreach (var id in userFavorites.Favorites)
-                {
-                    if (await GetProductAsync(id, cancellationToken) != null)
-                    {
-                        cats.Add(await GetCatAsync(id, cancellationToken));
-                    }
-                }
-            }
+            //if (userFavorites != null && userFavorites.Favorites != null)
+            //{
+            //    foreach (var id in userFavorites.Favorites)
+            //    {
+            //        if (await GetProductAsync(id, cancellationToken) != null)
+            //        {
+            //            cats.Add(await GetCatAsync(id, cancellationToken));
+            //        }
+            //    }
+            //}
 
-            return cats;
+            //return cats;
+
+            return userFavorites == null || userFavorites.Favorites == null
+                ? new List<Cat>()
+                : userFavorites.Favorites
+                    .Where(id => GetProductAsync(id, cancellationToken) != null)
+                    .Select(async id => await GetCatAsync(id, cancellationToken))
+                    .Select(t => t.Result)
+                    .ToList();
         }
 
         public async Task DeleteCatFromFavouritesAsync(string sessionId, Guid catId, 
