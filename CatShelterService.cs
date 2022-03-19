@@ -40,15 +40,15 @@ namespace Microservices
             _catExchangeService = catExchangeService;
         }
 
-        public async Task<List<Cat>> GetCatsAsync(string sessionId, int skip, int limit, 
+        public async Task<List<Cat>> GetCatsAsync(string sessionId, int skip, int limit,
                                                   CancellationToken cancellationToken)
         {
             var user = await TryAuthorizeAsync(sessionId, cancellationToken);
 
-            var billing = await TryTwice(() => _billingService.GetProductsAsync(skip, limit, cancellationToken));  
+            var billing = await TryConnect(2, () => _billingService.GetProductsAsync(skip, limit, cancellationToken));
 
             return billing
-                .Select(async product => await GetCatAsync(product.Id, cancellationToken))
+                .Select(async product => await MakeCatAsync(product.Id, cancellationToken))
                 .Select(t => t.Result)
                 .ToList();
         }
@@ -57,13 +57,9 @@ namespace Microservices
         {
             var user = await TryAuthorizeAsync(sessionId, cancellationToken);
 
-            var userFavorites = await FindInCollectionAsync<UserFavorites>("Favorites", user.UserId, cancellationToken);
-
-            if (userFavorites == null)
-            {
-                userFavorites = new UserFavorites { Id = user.UserId, Favorites = new HashSet<Guid>() };
-            }
-
+            var userFavorites = await GetFavorites(user.UserId, cancellationToken) 
+                                ?? new UserFavorites { Id = user.UserId, Favorites = new HashSet<Guid>() };
+            
             userFavorites.Favorites.Add(catId);
 
             await WriteToCollectionAsync("Favorites", userFavorites, cancellationToken);
@@ -73,40 +69,22 @@ namespace Microservices
         {
             var user = await TryAuthorizeAsync(sessionId, cancellationToken);
 
-            var userFavorites = await FindInCollectionAsync<UserFavorites>("Favorites", user.UserId, cancellationToken);
-
-            //var cats = new List<Cat>();
-
-            //if (userFavorites != null && userFavorites.Favorites != null)
-            //{
-            //    foreach (var id in userFavorites.Favorites)
-            //    {
-            //        if (await GetProductAsync(id, cancellationToken) != null)
-            //        {
-            //            cats.Add(await GetCatAsync(id, cancellationToken));
-            //        }
-            //    }
-            //}
-
-            //return cats;
-
-            return userFavorites == null || userFavorites.Favorites == null
-                ? new List<Cat>()
-                : userFavorites.Favorites
-                    .Where(id => GetProductAsync(id, cancellationToken) != null)
-                    .Select(async id => await GetCatAsync(id, cancellationToken))
-                    .Select(t => t.Result)
-                    .ToList();
+            return (await GetFavorites(user.UserId, cancellationToken))?.Favorites?
+                        .Where(id => GetProductAsync(id, cancellationToken).Result != null)
+                        .Select(async id => await MakeCatAsync(id, cancellationToken))
+                        .Select(t => t.Result)
+                        .ToList()
+                   ?? new List<Cat>();
         }
 
-        public async Task DeleteCatFromFavouritesAsync(string sessionId, Guid catId, 
+        public async Task DeleteCatFromFavouritesAsync(string sessionId, Guid catId,
                                                        CancellationToken cancellationToken)
         {
             var user = await TryAuthorizeAsync(sessionId, cancellationToken);
 
-            var userFavorites = await FindInCollectionAsync<UserFavorites>("Favorites", user.UserId, cancellationToken);
+            var userFavorites = await GetFavorites(user.UserId, cancellationToken);
 
-            if (userFavorites != null && userFavorites.Favorites != null)
+            if (userFavorites?.Favorites is not null)
             {
                 userFavorites.Favorites.Remove(catId);
                 await WriteToCollectionAsync("Favorites", userFavorites, cancellationToken);
@@ -117,28 +95,19 @@ namespace Microservices
         {
             var user = await TryAuthorizeAsync(sessionId, cancellationToken);
 
-            var product = await GetProductAsync(catId, cancellationToken);
+            var product = await GetProductAsync(catId, cancellationToken) ?? throw new InvalidRequestException();
 
-            if (product == null)
-                throw new InvalidRequestException();
+            var catPrice = (await GetBreedPricesAsync(product.BreedId, cancellationToken))?.Last().Price ?? 1000;
 
-            var cat = await GetCatAsync(product.Id, cancellationToken);
-
-            return cat == null
-                ? null    
-                : await TryTwice(() => _billingService.SellProductAsync(catId, cat.Price, cancellationToken));
+            return await TryConnect(2, () => _billingService.SellProductAsync(catId, catPrice, cancellationToken));
         }
 
-        public async Task<Guid> AddCatAsync(string sessionId, AddCatRequest request, 
+        public async Task<Guid> AddCatAsync(string sessionId, AddCatRequest request,
                                             CancellationToken cancellationToken)
         {
             var user = await TryAuthorizeAsync(sessionId, cancellationToken);
 
-            var catInfo = await TryTwice(() => _catInfoService.FindByBreedNameAsync(request.Breed, cancellationToken));
-
-            var priceInfo = await GetPriceHistoryAsync(catInfo.BreedId, cancellationToken);
-
-            var latestPrice = GetCatPriceInfo(priceInfo);
+            var catInfo = await GetCatInfoAsync(request.Breed, cancellationToken);
 
             var catEntity = new CatEntity()
             {
@@ -149,8 +118,8 @@ namespace Microservices
                 CatPhoto = request.Photo
             };
 
-            await TryTwice(() => _billingService.AddProductAsync(
-                new Product { Id = catEntity.Id, BreedId = catEntity.BreedId }, 
+            await TryConnect(2, () => _billingService.AddProductAsync(
+                new Product { Id = catEntity.Id, BreedId = catEntity.BreedId },
                 cancellationToken
             ));
 
@@ -174,13 +143,9 @@ namespace Microservices
             public HashSet<Guid> Favorites { get; set; }
         }
 
-        private async Task<T> TryTwice<T>(Func<Task<T>> func)
+        private async Task<T> TryConnect<T>(int tryCount, Func<Task<T>> func)
         {
-            try
-            {
-                return await func();
-            }
-            catch (ConnectionException)
+            while (true)
             {
                 try
                 {
@@ -188,33 +153,32 @@ namespace Microservices
                 }
                 catch (ConnectionException)
                 {
-                    throw new InternalErrorException();
+                    if (--tryCount == 0)
+                        throw new InternalErrorException();
                 }
             }
         }
 
-        private async Task TryTwice(Func<Task> func)
+        private async Task TryConnect(int tryCount, Func<Task> func)
         {
-            try
-            {
-                await func();
-            }
-            catch (ConnectionException)
+            while (true)
             {
                 try
                 {
                     await func();
+                    return;
                 }
                 catch (ConnectionException)
                 {
-                    throw new InternalErrorException();
+                    if (--tryCount == 0)
+                        throw new InternalErrorException();
                 }
             }
         }
 
         private async Task<AuthorizationResult> TryAuthorizeAsync(string sessionId, CancellationToken cancellationToken)
         {
-            var result = await TryTwice(() => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
+            var result = await TryConnect(2, () => _authorizationService.AuthorizeAsync(sessionId, cancellationToken));
 
             return result.IsSuccess
                 ? result
@@ -222,33 +186,42 @@ namespace Microservices
         }
 
         private async Task<Product> GetProductAsync(Guid id, CancellationToken cancellationToken) =>
-            await TryTwice(() => _billingService.GetProductAsync(id, cancellationToken));
+            await TryConnect(2, () => _billingService.GetProductAsync(id, cancellationToken));
 
-        private async Task<CatPriceHistory> GetPriceHistoryAsync(Guid breedId, CancellationToken cancellationToken) =>
-            await TryTwice(() => _catExchangeService.GetPriceInfoAsync(breedId, cancellationToken));
+        private async Task<T> FindInCollectionAsync<T>(string collection, Guid id, CancellationToken cancellationToken)
+        where T : class, IEntityWithId<Guid> =>
+            await TryConnect(2, () => _db.GetCollection<T, Guid>(collection).FindAsync(id, cancellationToken));
 
-        private async Task<T> FindInCollectionAsync<T>(string collection, Guid id, 
-                                                       CancellationToken cancellationToken) 
-            where T : class, IEntityWithId<Guid> =>
-                await TryTwice<T>(() => _db.GetCollection<T, Guid>(collection).FindAsync(id, cancellationToken));
+        private async Task WriteToCollectionAsync<T>(string collection, T document, CancellationToken cancellationToken)
+        where T : class, IEntityWithId<Guid> =>
+            await TryConnect(2, () => _db.GetCollection<T, Guid>(collection).WriteAsync(document, cancellationToken));
 
-        private async Task WriteToCollectionAsync<T>(string collection, T document,
-                                                     CancellationToken cancellationToken)
-            where T : class, IEntityWithId<Guid> =>
-                await TryTwice(() => _db.GetCollection<T, Guid>(collection).WriteAsync(document, cancellationToken));
+        private async Task<UserFavorites> GetFavorites(Guid userId, CancellationToken cancellationToken) =>
+            await FindInCollectionAsync<UserFavorites>("Favorites", userId, cancellationToken);
 
-        private async Task<Cat> GetCatAsync(Guid catId, CancellationToken cancellationToken)
+        private async Task<CatInfo> GetCatInfoAsync(Guid breedId, CancellationToken cancellationToken) =>
+            await TryConnect(2, () => _catInfoService.FindByBreedIdAsync(breedId, cancellationToken));
+
+        private async Task<CatInfo> GetCatInfoAsync(string breedName, CancellationToken cancellationToken) =>
+            await TryConnect(2, () => _catInfoService.FindByBreedNameAsync(breedName, cancellationToken));
+
+        private async Task<List<(DateTime Date, decimal Price)>> GetBreedPricesAsync(Guid breedId,
+                                                                        CancellationToken cancellationToken)
+        {
+            var history = await TryConnect(2, () => _catExchangeService.GetPriceInfoAsync(breedId, cancellationToken));
+
+            return history.Prices.Count > 0
+                ? history.Prices.Select(p => (p.Date, p.Price)).ToList()
+                : null;
+        }
+
+        private async Task<Cat> MakeCatAsync(Guid catId, CancellationToken cancellationToken)
         {
             var catEntity = await FindInCollectionAsync<CatEntity>("CatEntities", catId, cancellationToken);
 
-            if (catEntity == null)
-                return null;
+            var catInfo = await GetCatInfoAsync(catEntity.BreedId, cancellationToken);
 
-            var catInfo = await TryTwice(() => _catInfoService.FindByBreedIdAsync(catEntity.BreedId, cancellationToken));
-
-            var priceInfo = await GetPriceHistoryAsync(catInfo.BreedId, cancellationToken);
-
-            var latestPrice = GetCatPriceInfo(priceInfo);
+            var prices = await GetBreedPricesAsync(catInfo.BreedId, cancellationToken);
 
             return new Cat
             {
@@ -259,14 +232,9 @@ namespace Microservices
                 Name = catEntity.Name,
                 CatPhoto = catEntity.CatPhoto,
                 BreedPhoto = catInfo.Photo,
-                Price = latestPrice.Price,
-                Prices = priceInfo.Prices.Select(p => (p.Date, p.Price)).ToList()
+                Price = prices?.Last().Price ?? 1000,
+                Prices = prices ?? new List<(DateTime Date, decimal Price)>()
             };
         }
-
-        private CatPriceInfo GetCatPriceInfo(CatPriceHistory history) => 
-            history.Prices != null && history.Prices.Count > 0
-                ? history.Prices.Last()
-                : new CatPriceInfo { Date = DateTime.Now, Price = 1000 };
     }
 }
