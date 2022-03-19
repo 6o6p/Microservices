@@ -47,8 +47,10 @@ namespace Microservices
 
             var billing = await TryConnect(2, () => _billingService.GetProductsAsync(skip, limit, cancellationToken));
 
+            var catEntities = _db.GetCollection<CatEntity, Guid>("CatEntities");
+
             return billing
-                .Select(async product => await MakeCatAsync(product.Id, cancellationToken))
+                .Select(async product => await MakeCatAsync(catEntities, product.Id, cancellationToken))
                 .Select(t => t.Result)
                 .ToList();
         }
@@ -69,9 +71,11 @@ namespace Microservices
         {
             var user = await TryAuthorizeAsync(sessionId, cancellationToken);
 
+            var catEntities = _db.GetCollection<CatEntity, Guid>("CatEntities");
+
             return (await GetFavorites(user.UserId, cancellationToken))?.Favorites?
                         .Where(id => GetProductAsync(id, cancellationToken).Result != null)
-                        .Select(async id => await MakeCatAsync(id, cancellationToken))
+                        .Select(async id => await MakeCatAsync(catEntities, id, cancellationToken))
                         .Select(t => t.Result)
                         .ToList()
                    ?? new List<Cat>();
@@ -188,16 +192,13 @@ namespace Microservices
         private async Task<Product> GetProductAsync(Guid id, CancellationToken cancellationToken) =>
             await TryConnect(2, () => _billingService.GetProductAsync(id, cancellationToken));
 
-        private async Task<T> FindInCollectionAsync<T>(string collection, Guid id, CancellationToken cancellationToken)
-        where T : class, IEntityWithId<Guid> =>
-            await TryConnect(2, () => _db.GetCollection<T, Guid>(collection).FindAsync(id, cancellationToken));
-
         private async Task WriteToCollectionAsync<T>(string collection, T document, CancellationToken cancellationToken)
         where T : class, IEntityWithId<Guid> =>
             await TryConnect(2, () => _db.GetCollection<T, Guid>(collection).WriteAsync(document, cancellationToken));
 
         private async Task<UserFavorites> GetFavorites(Guid userId, CancellationToken cancellationToken) =>
-            await FindInCollectionAsync<UserFavorites>("Favorites", userId, cancellationToken);
+            await TryConnect(2, () => _db.GetCollection<UserFavorites, Guid>("Favorites")
+                                         .FindAsync(userId, cancellationToken));
 
         private async Task<CatInfo> GetCatInfoAsync(Guid breedId, CancellationToken cancellationToken) =>
             await TryConnect(2, () => _catInfoService.FindByBreedIdAsync(breedId, cancellationToken));
@@ -215,9 +216,10 @@ namespace Microservices
                 : null;
         }
 
-        private async Task<Cat> MakeCatAsync(Guid catId, CancellationToken cancellationToken)
+        private async Task<Cat> MakeCatAsync(IDatabaseCollection<CatEntity, Guid> catEntities, 
+                                             Guid catId, CancellationToken cancellationToken)
         {
-            var catEntity = await FindInCollectionAsync<CatEntity>("CatEntities", catId, cancellationToken);
+            var catEntity = await TryConnect(2, () => catEntities.FindAsync(catId, cancellationToken)); 
 
             var catInfo = await GetCatInfoAsync(catEntity.BreedId, cancellationToken);
 
