@@ -47,11 +47,11 @@ namespace Microservices
 
             var billing = await TryConnect(2, () => _billingService.GetProductsAsync(skip, limit, cancellationToken));
 
-            var catEntities = _db.GetCollection<CatEntity, Guid>("CatEntities");
+            var catEntities = _db.GetCollection<CatEntity, Guid>("CatEntities"); //Можно коллекцию в поле прям в конструкторе сохранять
 
             return billing
                 .Select(async product => await MakeCatAsync(catEntities, product.Id, cancellationToken))
-                .Select(t => t.Result)
+                .Select(t => t.Result) //Вот так с асинхронным кодом точно делать не надо. Нет асинхронного LINQ - не надо использовать LINQ
                 .ToList();
         }
 
@@ -149,7 +149,7 @@ namespace Microservices
 
         private async Task<T> TryConnect<T>(int tryCount, Func<Task<T>> func)
         {
-            while (true)
+            while (true) //Можно использовать цикл for
             {
                 try
                 {
@@ -158,7 +158,7 @@ namespace Microservices
                 catch (ConnectionException)
                 {
                     if (--tryCount == 0)
-                        throw new InternalErrorException();
+                        throw new InternalErrorException(); //Можно пойти чуть дальше и вынести обработку ошибок в общее место
                 }
             }
         }
